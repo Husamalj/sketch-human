@@ -1,0 +1,1162 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sketch Human – Rough.js</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1e1e1e;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 100vh; font-family: sans-serif;
+    }
+    canvas {
+      border-radius: 10px;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.7);
+    }
+    #controls {
+      margin-top: 18px;
+      display: flex; gap: 12px;
+    }
+    button {
+      background: #2e2e2e; color: #f5f0e8;
+      border: 1.5px solid #555; border-radius: 6px;
+      padding: 8px 20px; cursor: pointer; font-size: 14px;
+      transition: background .15s;
+    }
+    button:hover { background: #444; }
+    button.active { background: #4a7fa5; border-color: #4a7fa5; }
+    #label {
+      margin-top: 10px; color: #888; font-size: 13px; letter-spacing: .04em;
+    }
+  </style>
+</head>
+<body>
+
+<div style="position:relative;display:inline-block;">
+<canvas id="c"></canvas>
+<canvas id="gl" style="position:absolute;top:0;left:0;pointer-events:none;border-radius:10px;"></canvas>
+</div>
+
+<div id="controls">
+  <button id="btn-walk" class="active" onclick="setMode('walk')">Walk</button>
+  <button id="btn-sleep"  onclick="setMode('sleep')">Sleep</button>
+  <button id="btn-jump" onclick="setMode('jump')">Jump</button>
+  <button id="btn-wave" onclick="setMode('wave')">Wave</button>
+  <button id="btn-idle" onclick="setMode('idle')">Idle</button>
+  <button id="btn-away" onclick="setMode('away')">Walk Away</button>
+  <button id="btn-phone"  onclick="setMode('phone')">Phone Walk</button>
+</div>
+<div id="label">Drag speed slider — rough lines are alive</div>
+
+<script src="https://unpkg.com/roughjs@4.6.0/bundled/rough.js"></script>
+<script>
+// ── Canvas setup ────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width  = 900;
+const H = canvas.height = 500;
+const rc = rough.canvas(canvas);
+
+// ── Palette ─────────────────────────────────────────────────────
+const P = {
+  paper:   '#f5f0e8',
+  sky:     '#d4e9f7',
+  ground:  '#8b6f47',
+  grass:   '#6a8f3c',
+  pencil:  '#1a1a2e',
+  skin:    '#f2c98a',
+  skinSh:  '#d4a96a',
+  shirt:   '#4a7fa5',
+  pants:   '#3d3d5c',
+  shoes:   '#2b1f14',
+  hair:    '#2b1a0a',
+  accent:  '#ffe566',
+  red:     '#e85d44',
+  white:   '#ffffff',
+};
+
+// ── Mode ─────────────────────────────────────────────────────────
+let mode = 'walk';
+let frame = 0;
+let jumpT = 0;
+let awayT = 0;   // 0 = near (full size), 1 = horizon (tiny)
+let sleepT = 0;
+let phoneT = 0;
+
+function setMode(m) {
+  mode = m;
+  frame = 0; jumpT = 0; awayT = 0; sleepT = 0; phoneT = 0;
+  document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + m).classList.add('active');
+}
+
+// ── Walk cycle data (8 frames) ────────────────────────────────
+// [lUpperLeg°, lLowerLeg°, rUpperLeg°, rLowerLeg°, hipY, lUpperArm°, rUpperArm°, lLowerArm°, rLowerArm°]
+const WALK_FRAMES = [
+  [-28,  8,  32, -38,  0,  22, -22,  10, -15],
+  [-12, 18,  16, -22,  4,  10, -10,   5,  -8],
+  [ 14, 22,  -4,  -4,  0,  -4,   4,  -4,   3],
+  [ 30, -4, -22,   4, -4, -20,  20, -12,  12],
+  [ 28, -4, -30,  38,  0, -22,  22, -15,  10],
+  [ 12,-14, -16,  22,  4, -10,  10,  -8,   5],
+  [-14,-20,   4,   4,  0,   4,  -4,   3,  -4],
+  [-30,  4,  22,  -4, -4,  20, -20,  12, -12],
+];
+
+const RUN_FRAMES = [
+  [-42, 12,  50, -55,  0,  38, -35,  18, -25],
+  [-18, 28,  24, -30,  6,  18, -16,   8, -14],
+  [ 22, 35,  -8,  -8,  0,  -8,   8,  -8,   6],
+  [ 48, -8, -35,   8, -6, -36,  40, -22,  24],
+  [ 42,-10, -50,  55,  0, -38,  36, -25,  18],
+  [ 18,-26, -24,  30,  6, -18,  16, -14,   8],
+  [-22,-34,   8,   8,  0,   8,  -8,   6,  -8],
+  [-48,  8,  36,  -8, -6,  36, -40,  24, -22],
+];
+
+// ── Helpers ──────────────────────────────────────────────────────
+function toRad(deg) { return deg * Math.PI / 180; }
+
+// Rough.js options generator
+function opt(fill, strokeW, roughness, fillStyle, extra) {
+  const base = {
+    roughness: roughness ?? 1.3,
+    bowing: 0.7,
+    stroke: P.pencil,
+    strokeWidth: strokeW ?? 2.2,
+    fill: fill ?? 'none',
+    fillStyle: fillStyle ?? 'solid',
+    seed: Math.floor(Math.random() * 9999),   // line boil
+  };
+  return extra ? { ...base, ...extra } : base;
+}
+
+// Stable option (no boil — for background elements)
+function sopt(fill, strokeW, roughness, seed) {
+  return { roughness: roughness ?? 1.1, bowing: 0.5, stroke: P.pencil,
+           strokeWidth: strokeW ?? 1.8, fill: fill ?? 'none',
+           fillStyle: 'solid', seed: seed ?? 1 };
+}
+
+// Draw a rotated limb: segment from (px,py) at angle, length L, width W
+function drawLimb(px, py, angleDeg, L, limbW, fillColor) {
+  const a = toRad(angleDeg + 90);
+  const ex = px + Math.cos(a) * L;
+  const ey = py + Math.sin(a) * L;
+
+  // Build a rotated rectangle as polygon
+  const na = toRad(angleDeg);   // perpendicular
+  const hw = limbW / 2;
+  const dx = Math.cos(na) * hw;
+  const dy = Math.sin(na) * hw;
+
+  const pts = [
+    [px - dx, py - dy],
+    [px + dx, py + dy],
+    [ex + dx, ey + dy],
+    [ex - dx, ey - dy],
+  ];
+  rc.polygon(pts, opt(fillColor, 2, 1.3, 'solid'));
+  return { ex, ey };
+}
+
+// ── City Street Background ────────────────────────────────────────
+// Building data: [xOffset, width, height, wallColor, accentColor, seed, label, labelColor]
+const BUILDINGS = [
+  [   0, 160, 260, '#e8ddd0', '#c9bfb5', 10, 'لا يوجد فرص عمل',   '#c0392b'],
+  [ 170, 130, 200, '#d4e8d4', '#b5ccb5', 20, 'لا يوجد فرص عمل', '#27ae60'],
+  [ 310, 180, 290, '#dce0f0', '#bbbfd8', 30, 'لا يوجد فرص عمل',    '#2c3e8a'],
+  [ 500, 150, 220, '#f0e0cc', '#d4c4b0', 40, 'لا يوجد فرص عمل',     '#8B4513'],
+  [ 660, 200, 270, '#f0dce8', '#d4b8cc', 50, 'لا يوجد فرص عمل',   '#8B008B'],
+  [ 870, 140, 240, '#ddeedd', '#bbcfbb', 60, 'لا يوجد فرص عمل',   '#1a6e2e'],
+  [1020, 170, 250, '#e8e0d0', '#ccc4b5', 70, 'لا يوجد فرص عمل',    '#b84800'],
+  [1200, 160, 200, '#d8e8f0', '#b8ccda', 80, 'لا يوجد فرص عمل',  '#c0006a'],
+  [1370, 190, 280, '#ece8d8', '#d0ccbc', 90, 'لا يوجد فرص عمل', '#4a3000'],
+];
+
+function drawBuilding(bx, bw, bh, wall, accent, seed, label, labelCol, scrollX) {
+  const x = ((bx - scrollX * 0.55) % (W + 400) + W + 400) % (W + 400) - 200;
+  const groundY = H * 0.68;
+  const top = groundY - bh;
+
+  // Main wall
+  rc.rectangle(x, top, bw, bh,
+    { roughness: 0.7, stroke: '#555', strokeWidth: 1.8, fill: wall, fillStyle: 'solid', seed });
+
+  // Rooftop ledge
+  rc.rectangle(x - 6, top - 10, bw + 12, 14,
+    { roughness: 0.9, stroke: '#555', strokeWidth: 2, fill: accent, fillStyle: 'solid', seed: seed+1 });
+
+  // Storefront awning (coloured strip)
+  rc.rectangle(x + 4, top + bh * 0.52, bw - 8, 32,
+    { roughness: 1.0, stroke: '#333', strokeWidth: 1.5, fill: labelCol, fillStyle: 'solid', seed: seed+2 });
+
+  // Store window (big glass pane)
+  rc.rectangle(x + 10, top + bh * 0.60, bw - 20, bh * 0.27,
+    { roughness: 0.5, stroke: '#666', strokeWidth: 1.5, fill: '#d8eef8', fillStyle: 'solid', seed: seed+3 });
+  // window cross bars
+  rc.line(x + bw/2, top + bh*0.60, x + bw/2, top + bh*0.60 + bh*0.27,
+    { roughness: 0.6, stroke: '#888', strokeWidth: 1, seed: seed+4 });
+  rc.line(x + 10, top + bh*0.60 + bh*0.135, x + bw - 10, top + bh*0.60 + bh*0.135,
+    { roughness: 0.6, stroke: '#888', strokeWidth: 1, seed: seed+5 });
+
+  // Store door
+  const doorW = 28, doorH = 50;
+  const doorX = x + bw/2 - doorW/2;
+  const doorY = groundY - doorH;
+  rc.rectangle(doorX, doorY, doorW, doorH,
+    { roughness: 0.8, stroke: '#444', strokeWidth: 1.8, fill: '#8B6040', fillStyle: 'solid', seed: seed+6 });
+  rc.ellipse(doorX + doorW - 7, doorY + doorH/2, 5, 5,
+    { roughness: 0.5, stroke: '#ccc', strokeWidth: 1, fill: '#d4af37', fillStyle: 'solid', seed: seed+7 });
+
+  // Upper windows (2 rows)
+  const winW = 28, winH = 32, winGap = 16;
+  const cols = Math.floor((bw - winGap*2) / (winW + winGap));
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < cols; col++) {
+      const wx = x + winGap + col * (winW + winGap);
+      const wy = top + 18 + row * (winH + 16);
+      // random lit / unlit
+      const lit = (seed + row * 7 + col * 13) % 3 !== 0;
+      rc.rectangle(wx, wy, winW, winH,
+        { roughness: 0.5, stroke: '#555', strokeWidth: 1.2,
+          fill: lit ? '#fffbe0' : '#b0c8d8', fillStyle: 'solid', seed: seed+10+col+row*5 });
+    }
+  }
+
+  // Store sign above awning
+  ctx.save();
+  ctx.font = 'bold 14px Arial, sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.direction = 'rtl';
+  ctx.fillText(label, x + bw/2, top + bh * 0.52 + 17);
+  ctx.direction = 'ltr';
+  ctx.restore();
+}
+
+function drawStreetLamp(lx, scrollX, seed) {
+  const x = ((lx - scrollX * 0.55) % (W + 300) + W + 300) % (W + 300) - 150;
+  const groundY = H * 0.68;
+  // pole
+  rc.line(x, groundY, x, groundY - 130,
+    { roughness: 0.8, stroke: '#444', strokeWidth: 3, seed });
+  // arm
+  rc.line(x, groundY - 130, x + 30, groundY - 130,
+    { roughness: 0.8, stroke: '#444', strokeWidth: 3, seed: seed+1 });
+  // lamp head
+  rc.rectangle(x + 18, groundY - 140, 26, 16,
+    { roughness: 0.8, stroke: '#444', strokeWidth: 1.8, fill: '#f5e87a', fillStyle: 'solid', seed: seed+2 });
+}
+
+function drawBackground(scrollX) {
+  // ── Sky (city haze) ──────────────────────────────────────────
+  ctx.fillStyle = '#dce8f5';
+  ctx.fillRect(0, 0, W, H);
+
+  // distant sky glow / smog gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H * 0.65);
+  grad.addColorStop(0,   'rgba(200,218,240,0)');
+  grad.addColorStop(1,   'rgba(230,210,190,0.25)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H * 0.65);
+
+  // ── Buildings (far layer, slower scroll) ─────────────────────
+  BUILDINGS.forEach(b => drawBuilding(...b, scrollX));
+
+  // ── Street lamps ─────────────────────────────────────────────
+  [[140,200],[420,210],[700,220],[960,230],[1240,240]].forEach(([lx,sd]) =>
+    drawStreetLamp(lx, scrollX, sd));
+
+  // ── Kerb / pavement ──────────────────────────────────────────
+  const groundY = H * 0.68;
+  // pavement slab (light grey)
+  rc.rectangle(0, groundY, W, H * 0.10,
+    { roughness: 0.4, stroke: '#aaa', strokeWidth: 1, fill: '#d8d4cc', fillStyle: 'solid', seed: 300 });
+
+  // pavement cracks / slab lines (scrolling)
+  const slabW = 90;
+  for (let i = 0; i < 12; i++) {
+    const sx = ((i * slabW - scrollX * 0.85) % (W + slabW) + W + slabW) % (W + slabW) - slabW;
+    rc.line(sx, groundY + 2, sx, groundY + H * 0.10 - 2,
+      { roughness: 1.2, stroke: '#bbb', strokeWidth: 1, seed: i * 7 + 300 });
+  }
+
+  // ── Road (darker asphalt below pavement) ─────────────────────
+  rc.rectangle(0, groundY + H * 0.10, W, H * 0.22,
+    { roughness: 0.3, stroke: '#888', strokeWidth: 1, fill: '#6a6a6a', fillStyle: 'solid', seed: 400 });
+
+  // road centre dashes (scrolling)
+  const dashW = 50, dashGap = 40;
+  for (let i = 0; i < 14; i++) {
+    const dx = ((i * (dashW + dashGap) - scrollX * 1.2) % (W + dashW + dashGap) + W + dashW + dashGap) % (W + dashW + dashGap) - dashW;
+    rc.line(dx, groundY + H * 0.16, dx + dashW, groundY + H * 0.16,
+      { roughness: 0.5, stroke: '#f5f0c0', strokeWidth: 3, seed: i + 500 });
+  }
+
+  // kerb edge line
+  rc.line(0, groundY, W, groundY,
+    { roughness: 1.2, stroke: '#999', strokeWidth: 2.5, seed: 600 });
+  rc.line(0, groundY + H * 0.10, W, groundY + H * 0.10,
+    { roughness: 0.8, stroke: '#555', strokeWidth: 2, seed: 601 });
+}
+
+// ── Human character ──────────────────────────────────────────────
+function drawHuman(cx, cy, poseData, expression) {
+  const [lUL, lLL, rUL, rLL, hipDY, lUA, rUA, lLA, rLA] = poseData;
+  const hy = cy + hipDY;  // hip Y (bobs up/down)
+
+  // ── Back arm ────────────────────────────────────────────────
+  const backArmSide = lUA < 0 ? 'left' : 'right';
+  if (backArmSide === 'right') {
+    const { ex: rex, ey: rey } = drawLimb(cx + 6, hy - 40, rUA, 28, 10, "#22283a");
+    drawLimb(rex, rey, rUA + rLA, 24, 9, P.skin);
+  } else {
+    const { ex: lex, ey: ley } = drawLimb(cx - 6, hy - 40, lUA, 28, 10, "#22283a");
+    drawLimb(lex, ley, lUA + lLA, 24, 9, P.skin);
+  }
+
+  // ── Back leg ────────────────────────────────────────────────
+  const { ex: blKx, ey: blKy } = drawLimb(cx, hy, rUL, 30, 12, P.pants);
+  drawLimb(blKx, blKy, rUL + rLL, 28, 11, P.pants);
+  // back shoe
+  rc.ellipse(blKx + Math.cos(toRad(rUL+rLL+90))*28,
+             blKy + Math.sin(toRad(rUL+rLL+90))*28,
+             22, 11, opt(P.shoes, 1.8, 1.0, 'solid'));
+
+  // ── Torso ────────────────────────────────────────────────────
+  const tiltA = lUL < 0 ? -3 : 3;
+  ctx.save();
+  ctx.translate(cx, hy - 20);
+  ctx.rotate(toRad(tiltA));
+
+  // Blue shirt underneath (visible at centre)
+  rc.rectangle(-13, -43, 26, 44, opt('#3a8fd4', 2.0, 1.0, 'solid'));
+
+  // Dark suit jacket left panel
+  rc.polygon([[-18,-45],[-2,-45],[-2,-1],[-18,-1]],
+    opt('#22283a', 2.2, 1.2, 'solid'));
+  // Dark suit jacket right panel
+  rc.polygon([[2,-45],[18,-45],[18,-1],[2,-1]],
+    opt('#22283a', 2.2, 1.2, 'solid'));
+
+  // Lapels (light grey V-shape)
+  rc.polygon([[-13,-45],[-1,-28],[0,-43]],
+    opt('#c8cdd8', 1.5, 1.0, 'solid'));
+  rc.polygon([[13,-45],[1,-28],[0,-43]],
+    opt('#c8cdd8', 1.5, 1.0, 'solid'));
+
+  // Button row down centre
+  [-34,-22,-10].forEach(by => {
+    rc.ellipse(0, by, 5, 5, opt('#f5f0e8', 1.2, 0.6, 'solid'));
+  });
+
+  // Pocket square (top-left)
+  rc.rectangle(-16, -40, 10, 8, opt('#e85d44', 1.2, 0.8, 'solid'));
+
+  // Collar / neck base
+  rc.ellipse(0, -44, 18, 10, opt(P.skin, 1.5, 1.0, 'solid'));
+  ctx.restore();
+
+  // ── Neck ────────────────────────────────────────────────────
+  rc.rectangle(cx - 7, hy - 88, 14, 16, opt(P.skin, 1.8, 1.1, 'solid'));
+
+  // ── Head ────────────────────────────────────────────────────
+  rc.ellipse(cx, hy - 110, 52, 58, opt(P.skin, 2.2, 1.4, 'solid'));
+
+  // Hair (rough blob on top)
+  rc.path(
+    `M ${cx-26} ${hy-114} Q ${cx-20} ${hy-150} ${cx} ${hy-146} Q ${cx+20} ${hy-150} ${cx+26} ${hy-114}`,
+    opt(P.hair, 2, 1.5, 'solid')
+  );
+
+  // Eyes
+  const blink = expression === 'blink';
+  if (blink) {
+    rc.line(cx-12, hy-96, cx-4, hy-96, opt(null, 2.5, 0.5));
+    rc.line(cx+4,  hy-96, cx+12, hy-96, opt(null, 2.5, 0.5));
+  } else {
+    rc.ellipse(cx - 8, hy - 117, 9, 11, opt(P.pencil, 1.5, 0.8, 'solid'));
+    rc.ellipse(cx + 8, hy - 117, 9, 11, opt(P.pencil, 1.5, 0.8, 'solid'));
+    // eye shine
+    rc.ellipse(cx - 6, hy-120, 3, 3, opt(P.white, 0.5, 0.3, 'solid'));
+    rc.ellipse(cx + 10, hy-120, 3, 3, opt(P.white, 0.5, 0.3, 'solid'));
+  }
+
+  // Eyebrows
+  const browLift = expression === 'surprised' ? -6 : 0;
+  rc.line(cx-14, hy-127+browLift, cx-4, hy-129+browLift, opt(null, 2.5, 0.8));
+  rc.line(cx+4,  hy-129+browLift, cx+14,hy-127+browLift, opt(null, 2.5, 0.8));
+
+  // Mouth
+  if (expression === 'happy') {
+    rc.path(`M ${cx-10} ${hy-96} Q ${cx} ${hy-68} ${cx+10} ${hy-96}`,
+      opt(null, 2, 0.8));
+  } else if (expression === 'open') {
+    rc.ellipse(cx, hy-94, 14, 10, opt(P.pencil, 1.5, 0.8, 'solid'));
+  } else {
+    rc.line(cx-8, hy-95, cx+8, hy-95, opt(null, 2, 0.6));
+  }
+
+  // Ears
+  rc.ellipse(cx - 27, hy - 108, 12, 16, opt(P.skin, 1.8, 1.0, 'solid'));
+  rc.ellipse(cx + 27, hy - 108, 12, 16, opt(P.skin, 1.8, 1.0, 'solid'));
+
+  // ── Front leg ────────────────────────────────────────────────
+  const { ex: flKx, ey: flKy } = drawLimb(cx, hy, lUL, 30, 13, P.pants);
+  drawLimb(flKx, flKy, lUL + lLL, 28, 12, P.pants);
+  // front shoe
+  rc.ellipse(flKx + Math.cos(toRad(lUL+lLL+90))*28,
+             flKy + Math.sin(toRad(lUL+lLL+90))*28,
+             24, 12, opt(P.shoes, 2, 1.0, 'solid'));
+
+  // ── Front arm ────────────────────────────────────────────────
+  const frontArmSide = backArmSide === 'left' ? 'right' : 'left';
+  if (frontArmSide === 'left') {
+    const { ex: lex, ey: ley } = drawLimb(cx - 6, hy - 40, lUA, 28, 11, "#22283a");
+    drawLimb(lex, ley, lUA + lLA, 24, 10, P.skin);
+  } else {
+    const { ex: rex, ey: rey } = drawLimb(cx + 6, hy - 40, rUA, 28, 11, "#22283a");
+    drawLimb(rex, rey, rUA + rLA, 24, 10, P.skin);
+  }
+}
+
+// ── Back-facing human (walking away) ────────────────────────────
+function drawHumanBack(cx, cy, poseData) {
+  const [lUL, lLL, rUL, rLL, hipDY, lUA, rUA, lLA, rLA] = poseData;
+  const hy = cy + hipDY;
+
+  // back leg (right)
+  const { ex: blKx, ey: blKy } = drawLimb(cx, hy, rUL, 30, 12, P.pants);
+  drawLimb(blKx, blKy, rUL + rLL, 28, 11, P.pants);
+  rc.ellipse(blKx + Math.cos(toRad(rUL+rLL+90))*28,
+             blKy + Math.sin(toRad(rUL+rLL+90))*28,
+             22, 11, opt(P.shoes, 1.8, 1.0, 'solid'));
+
+  // back arm (right)
+  const { ex: baRx, ey: baRy } = drawLimb(cx + 20, hy - 40, rUA, 28, 10, '#22283a');
+  drawLimb(baRx, baRy, rUA + rLA, 24, 9, P.skin);
+
+  // ── Torso back ──────────────────────────────────────────────
+  const tiltA = lUL < 0 ? -3 : 3;
+  ctx.save();
+  ctx.translate(cx, hy - 20);
+  ctx.rotate(toRad(tiltA));
+  // jacket back panel
+  rc.rectangle(-18, -45, 36, 46, opt('#22283a', 2.2, 1.2, 'solid'));
+  // centre seam
+  rc.line(0, -45, 0, -1, { roughness: 1.2, stroke: '#3a3f52', strokeWidth: 1.5, seed: 42 });
+  // shoulder seams
+  rc.line(-18, -43, -10, -45, { roughness: 1.0, stroke: '#3a3f52', strokeWidth: 1.2, seed: 43 });
+  rc.line( 18, -43,  10, -45, { roughness: 1.0, stroke: '#3a3f52', strokeWidth: 1.2, seed: 44 });
+  // jacket hem split at bottom
+  rc.line(-4, -1, -4, 10,  { roughness: 1.4, stroke: '#22283a', strokeWidth: 2, seed: 45 });
+  rc.line( 4, -1,  4, 10,  { roughness: 1.4, stroke: '#22283a', strokeWidth: 2, seed: 46 });
+  ctx.restore();
+
+  // ── Neck back ───────────────────────────────────────────────
+  rc.rectangle(cx - 7, hy - 88, 14, 16, opt(P.skin, 1.8, 1.1, 'solid'));
+
+  // ── Head back ───────────────────────────────────────────────
+  rc.ellipse(cx, hy - 110, 52, 58, opt(P.skin, 2.2, 1.4, 'solid'));
+  // full hair covering back of head
+  rc.path(
+    `M ${cx-27} ${hy-102} Q ${cx-28} ${hy-152} ${cx} ${hy-150} Q ${cx+28} ${hy-152} ${cx+27} ${hy-102}`,
+    opt(P.hair, 2, 1.5, 'solid')
+  );
+  // ears (sides)
+  rc.ellipse(cx - 27, hy - 108, 12, 16, opt(P.skin, 1.8, 1.0, 'solid'));
+  rc.ellipse(cx + 27, hy - 108, 12, 16, opt(P.skin, 1.8, 1.0, 'solid'));
+
+  // front leg (left) — drawn on top
+  const { ex: flKx, ey: flKy } = drawLimb(cx, hy, lUL, 30, 13, P.pants);
+  drawLimb(flKx, flKy, lUL + lLL, 28, 12, P.pants);
+  rc.ellipse(flKx + Math.cos(toRad(lUL+lLL+90))*28,
+             flKy + Math.sin(toRad(lUL+lLL+90))*28,
+             24, 12, opt(P.shoes, 2, 1.0, 'solid'));
+
+  // front arm (left)
+  const { ex: faLx, ey: faLy } = drawLimb(cx - 20, hy - 40, lUA, 28, 11, '#22283a');
+  drawLimb(faLx, faLy, lUA + lLA, 24, 10, P.skin);
+}
+
+// ── Pajama-wearing human (sleep scenes) ────────────────────────
+function drawHumanPajamas(cx, cy, poseData, expression) {
+  const [lUL, lLL, rUL, rLL, hipDY, lUA, rUA, lLA, rLA] = poseData;
+  const hy = cy + hipDY;
+  const PAJ_ARM = '#5a9ec8', PAJ_LEG = '#b0cfe0';
+
+  // Back arm
+  const backArmSide = lUA < 0 ? 'left' : 'right';
+  if (backArmSide === 'right') {
+    const { ex, ey } = drawLimb(cx+6, hy-40, rUA, 28, 10, PAJ_ARM);
+    drawLimb(ex, ey, rUA+rLA, 24, 9, P.skin);
+  } else {
+    const { ex, ey } = drawLimb(cx-6, hy-40, lUA, 28, 10, PAJ_ARM);
+    drawLimb(ex, ey, lUA+lLA, 24, 9, P.skin);
+  }
+  // Back leg
+  const { ex: blKx, ey: blKy } = drawLimb(cx, hy, rUL, 30, 12, PAJ_LEG);
+  drawLimb(blKx, blKy, rUL+rLL, 28, 11, PAJ_LEG);
+  rc.ellipse(blKx+Math.cos(toRad(rUL+rLL+90))*28, blKy+Math.sin(toRad(rUL+rLL+90))*28,
+    22, 11, opt(P.skin, 1.8, 1.0, 'solid'));
+
+  // Torso — pajama top (blue + white stripes)
+  const tiltA = lUL < 0 ? -3 : 3;
+  ctx.save();
+  ctx.translate(cx, hy-20);
+  ctx.rotate(toRad(tiltA));
+  rc.rectangle(-13, -43, 26, 60, opt('#7ab8d8', 2.0, 1.0, 'solid'));
+  for (let sy = -36; sy < 2; sy += 10)
+    rc.line(-12, sy, 12, sy, { roughness: 0.6, stroke: '#ffffff', strokeWidth: 2.5, seed: sy+1100 });
+  rc.ellipse(0, -44, 18, 10, opt(P.skin, 1.5, 1.0, 'solid'));
+  ctx.restore();
+
+  // Neck + Head (same as suit version)
+  rc.rectangle(cx-7, hy-88, 14, 16, opt(P.skin, 1.8, 1.1, 'solid'));
+  rc.ellipse(cx, hy-110, 52, 58, opt(P.skin, 2.2, 1.4, 'solid'));
+  rc.path(`M ${cx-26} ${hy-114} Q ${cx-20} ${hy-150} ${cx} ${hy-146} Q ${cx+20} ${hy-150} ${cx+26} ${hy-114}`,
+    opt(P.hair, 2, 1.5, 'solid'));
+  const blink = expression === 'blink';
+  if (blink) {
+    rc.line(cx-12, hy-96, cx-4, hy-96, opt(null, 2.5, 0.5));
+    rc.line(cx+4, hy-96, cx+12, hy-96, opt(null, 2.5, 0.5));
+  } else {
+    rc.ellipse(cx-8, hy-117, 9, 11, opt(P.pencil, 1.5, 0.8, 'solid'));
+    rc.ellipse(cx+8, hy-117, 9, 11, opt(P.pencil, 1.5, 0.8, 'solid'));
+    rc.ellipse(cx-6, hy-120, 3, 3, opt(P.white, 0.5, 0.3, 'solid'));
+    rc.ellipse(cx+10, hy-120, 3, 3, opt(P.white, 0.5, 0.3, 'solid'));
+  }
+  rc.line(cx-14, hy-127, cx-4, hy-129, opt(null, 2.5, 0.8));
+  rc.line(cx+4, hy-129, cx+14, hy-127, opt(null, 2.5, 0.8));
+  if (expression === 'open') {
+    rc.ellipse(cx, hy-94, 14, 10, opt(P.pencil, 1.5, 0.8, 'solid'));
+  } else {
+    rc.line(cx-8, hy-95, cx+8, hy-95, opt(null, 2, 0.6));
+  }
+  rc.ellipse(cx-27, hy-108, 12, 16, opt(P.skin, 1.8, 1.0, 'solid'));
+  rc.ellipse(cx+27, hy-108, 12, 16, opt(P.skin, 1.8, 1.0, 'solid'));
+
+  // Pajama waistband — covers hip skin gap
+  rc.rectangle(cx-14, hy-6, 28, 14, opt(PAJ_LEG, 1.5, 1.0, 'solid'));
+
+  // Front leg
+  const { ex: flKx, ey: flKy } = drawLimb(cx, hy, lUL, 30, 13, PAJ_LEG);
+  drawLimb(flKx, flKy, lUL+lLL, 28, 12, PAJ_LEG);
+  rc.ellipse(flKx+Math.cos(toRad(lUL+lLL+90))*28, flKy+Math.sin(toRad(lUL+lLL+90))*28,
+    24, 12, opt(P.skin, 2, 1.0, 'solid'));
+
+  // Front arm
+  const frontArmSide = backArmSide === 'left' ? 'right' : 'left';
+  if (frontArmSide === 'left') {
+    const { ex, ey } = drawLimb(cx-6, hy-40, lUA, 28, 11, PAJ_ARM);
+    drawLimb(ex, ey, lUA+lLA, 24, 10, P.skin);
+  } else {
+    const { ex, ey } = drawLimb(cx+6, hy-40, rUA, 28, 11, PAJ_ARM);
+    drawLimb(ex, ey, rUA+rLA, 24, 10, P.skin);
+  }
+}
+
+// ── Bedroom background ────────────────────────────────────────────
+function drawBedroom() {
+  // Bed sized to human; generous gaps between furniture
+  const bedL = W * 0.05, bedR = bedL + 210, bedW = bedR - bedL;
+  const mattressY = H * 0.52, mattressH = 52, frameH = 20;
+  const headCX = bedL + 38;            // face centre X on pillow
+  const nsX = bedR + 28, nsW = 58, nsH = mattressH + frameH;  // nightstand
+  const deskX = nsX + nsW + 58, deskW = 130;                  // desk (58px gap)
+  const bsX  = deskX + deskW + 36, bsW = 68;                  // bookshelf (36px gap)
+
+  // Wall
+  ctx.fillStyle = '#1e1b2e';
+  ctx.fillRect(0, 0, W, H * 0.72);
+
+  // Morning light bleed
+  const morning = Math.max(0, (sleepT - 0.22) / 0.08);
+  if (morning > 0) {
+    const mg = ctx.createLinearGradient(0, 0, W, 0);
+    mg.addColorStop(0, 'rgba(255,200,100,' + (morning * 0.18) + ')');
+    mg.addColorStop(1, 'rgba(255,200,100,0)');
+    ctx.fillStyle = mg;
+    ctx.fillRect(0, 0, W, H * 0.72);
+  }
+
+  // Wooden floor
+  rc.rectangle(0, H*0.72, W, H*0.28,
+    { roughness: 0.5, stroke: '#6b4a2a', strokeWidth: 1.5, fill: '#9b6b3a', fillStyle: 'solid', seed: 700 });
+  for (let i = 0; i < 8; i++)
+    rc.line(i*(W/7), H*0.72, i*(W/7), H, { roughness: 0.8, stroke: '#7a5230', strokeWidth: 1, seed: 700+i });
+
+  // ── Desk + monitor ──
+  const deskY = H * 0.60, deskH = 14;
+  const legH = H * 0.72 - deskY - deskH;
+  rc.rectangle(deskX, deskY, deskW, deskH,
+    { roughness: 0.8, stroke: '#5a3010', strokeWidth: 2, fill: '#8B5020', fillStyle: 'solid', seed: 980 });
+  rc.rectangle(deskX+8, deskY+deskH, 12, legH,
+    { roughness: 0.7, stroke: '#5a3010', strokeWidth: 1.8, fill: '#7a4020', fillStyle: 'solid', seed: 981 });
+  rc.rectangle(deskX+deskW-20, deskY+deskH, 12, legH,
+    { roughness: 0.7, stroke: '#5a3010', strokeWidth: 1.8, fill: '#7a4020', fillStyle: 'solid', seed: 982 });
+  const mX = deskX+22, mY = deskY-95, mW = 86, mH = 66;
+  rc.rectangle(mX-4, mY-4, mW+8, mH+8,
+    { roughness: 1.0, stroke: '#555', strokeWidth: 2, fill: 'none', seed: 984 });
+  rc.rectangle(mX, mY, mW, mH,
+    { roughness: 0.7, stroke: '#333', strokeWidth: 2, fill: '#08141e', fillStyle: 'solid', seed: 983 });
+  ctx.save();
+  ctx.fillStyle = '#00d48a';
+  [[8,10,52],[8,24,35],[8,38,58],[8,52,25]].forEach(([dx,dy,w]) => ctx.fillRect(mX+dx, mY+dy, w, 3));
+  ctx.restore();
+  rc.line(mX+mW/2, mY+mH, mX+mW/2, deskY, { roughness: 0.7, stroke: '#555', strokeWidth: 3, seed: 985 });
+  rc.ellipse(mX+mW/2, deskY, 32, 9, { roughness: 0.6, stroke: '#555', strokeWidth: 1.5, fill: '#444', fillStyle: 'solid', seed: 986 });
+  rc.rectangle(mX+6, deskY-3, mW-12, 10, { roughness: 1.0, stroke: '#666', strokeWidth: 1.5, fill: '#888', fillStyle: 'solid', seed: 987 });
+
+  // ── Bookshelf ──
+  const bsY = H * 0.17, bsH = H * 0.55;
+  rc.rectangle(bsX, bsY, bsW, bsH,
+    { roughness: 1.0, stroke: '#5a3010', strokeWidth: 2, fill: '#7a4020', fillStyle: 'solid', seed: 990 });
+  const bookColors = ['#e85d44','#4a7fa5','#f5e890','#3d3d5c','#6a8f3c','#d4a96a','#c0392b','#8e44ad','#e67e22'];
+  for (let sh = 0; sh < 3; sh++) {
+    const shY = bsY + 12 + sh * (bsH / 3);
+    rc.line(bsX, shY, bsX+bsW, shY, { roughness: 0.8, stroke: '#5a3010', strokeWidth: 2, seed: 991+sh });
+    let bx = bsX + 4;
+    for (let b = 0; b < 6; b++) {
+      const bw = 6 + (b%3 === 0 ? 4 : (b%3 === 1 ? 2 : 0));
+      rc.rectangle(bx, shY-42, bw, 38,
+        { roughness: 1.2, stroke: '#222', strokeWidth: 1, fill: bookColors[(sh*4+b)%bookColors.length], fillStyle: 'solid', seed: 995+sh*10+b });
+      bx += bw + 3;
+    }
+  }
+
+  // ── Window ──
+  const winX = W*0.72, winY = H*0.07, winW = 155, winH = 172;
+  if (sleepT < 0.22) {
+    ctx.fillStyle = '#080818';
+    ctx.fillRect(winX+5, winY+5, winW-10, winH-10);
+    rc.ellipse(winX+winW*0.68, winY+winH*0.28, 32, 32,
+      { roughness: 0.6, stroke: '#e8e0b0', strokeWidth: 1, fill: '#f5f0c0', fillStyle: 'solid', seed: 800 });
+    [[winX+38,winY+28],[winX+95,winY+18],[winX+125,winY+68],[winX+55,winY+88],[winX+115,winY+115]].forEach(([sx,sy],i) =>
+      rc.ellipse(sx,sy,4,4,{roughness:0.5,stroke:'#fff',strokeWidth:0.8,fill:'#fff',fillStyle:'solid',seed:810+i}));
+  } else {
+    const sky = ctx.createLinearGradient(winX+5, winY+5, winX+5, winY+winH-5);
+    sky.addColorStop(0, '#4a8fd4');
+    sky.addColorStop(0.55, '#f7b733');
+    sky.addColorStop(1, '#fc4a1a');
+    ctx.fillStyle = sky;
+    ctx.fillRect(winX+5, winY+5, winW-10, winH-10);
+    rc.ellipse(winX+winW*0.5, winY+winH*0.74, 38, 38,
+      { roughness: 0.7, stroke: '#ffd700', strokeWidth: 1.5, fill: '#ffe44a', fillStyle: 'solid', seed: 840 });
+  }
+  rc.rectangle(winX, winY, winW, winH,
+    { roughness: 1.0, stroke: '#8b7040', strokeWidth: 3, fill: 'none', seed: 820 });
+  rc.line(winX, winY+winH/2, winX+winW, winY+winH/2, { roughness: 0.8, stroke: '#8b7040', strokeWidth: 2, seed: 821 });
+  rc.line(winX+winW/2, winY, winX+winW/2, winY+winH, { roughness: 0.8, stroke: '#8b7040', strokeWidth: 2, seed: 822 });
+  rc.rectangle(winX-14, winY-8, 36, winH+16,
+    { roughness: 1.8, stroke: '#3a1850', strokeWidth: 2.5, fill: '#5a2878', fillStyle: 'solid', seed: 830 });
+  rc.line(winX-4, winY+5, winX+8, winY+winH+5, { roughness: 2.2, stroke: '#3a1850', strokeWidth: 1.2, seed: 832 });
+  rc.line(winX+8, winY, winX+18, winY+winH+5, { roughness: 2.0, stroke: '#3a1850', strokeWidth: 1.0, seed: 833 });
+  rc.rectangle(winX+winW-22, winY-8, 36, winH+16,
+    { roughness: 1.8, stroke: '#3a1850', strokeWidth: 2.5, fill: '#5a2878', fillStyle: 'solid', seed: 831 });
+  rc.line(winX+winW+4, winY+5, winX+winW-8, winY+winH+5, { roughness: 2.2, stroke: '#3a1850', strokeWidth: 1.2, seed: 834 });
+  rc.line(winX+winW-8, winY, winX+winW-18, winY+winH+5, { roughness: 2.0, stroke: '#3a1850', strokeWidth: 1.0, seed: 835 });
+
+  // ── Bed ──
+  rc.rectangle(bedL-22, mattressY-88, 32, 88+mattressH+frameH,
+    { roughness: 1.2, stroke: '#5a3010', strokeWidth: 3, fill: '#7a4020', fillStyle: 'solid', seed: 900 });
+  rc.line(bedL-14, mattressY-78, bedL-14, mattressY-12, { roughness: 1.5, stroke: '#6a3818', strokeWidth: 1.5, seed: 906 });
+  rc.line(bedL-5,  mattressY-78, bedL-5,  mattressY-12, { roughness: 1.5, stroke: '#6a3818', strokeWidth: 1.5, seed: 907 });
+  rc.rectangle(bedL, mattressY+mattressH, bedW, frameH,
+    { roughness: 0.8, stroke: '#5a3010', strokeWidth: 2.5, fill: '#8B5020', fillStyle: 'solid', seed: 901 });
+  rc.rectangle(bedL, mattressY, bedW, mattressH,
+    { roughness: 0.6, stroke: '#ccc', strokeWidth: 1.5, fill: '#e8e0d0', fillStyle: 'solid', seed: 902 });
+  // Bed legs
+  rc.rectangle(bedL+12, mattressY+mattressH+frameH, 14, 28,
+    { roughness: 0.9, stroke: '#5a3010', strokeWidth: 2, fill: '#7a4020', fillStyle: 'solid', seed: 903 });
+  rc.rectangle(bedR-26, mattressY+mattressH+frameH, 14, 28,
+    { roughness: 0.9, stroke: '#5a3010', strokeWidth: 2, fill: '#7a4020', fillStyle: 'solid', seed: 904 });
+  // Pillow — just face width (60px, centred on headCX)
+  rc.rectangle(headCX-30, mattressY-24, 60, 44,
+    { roughness: 1.5, stroke: '#bbb', strokeWidth: 2, fill: '#f0e8d8', fillStyle: 'solid', seed: 905 });
+
+  // Nightstand + lamp
+  rc.rectangle(nsX, mattressY, nsW, nsH,
+    { roughness: 0.9, stroke: '#5a3010', strokeWidth: 2, fill: '#8B5020', fillStyle: 'solid', seed: 910 });
+  rc.rectangle(nsX+6, mattressY+nsH, 10, 24,
+    { roughness: 0.8, stroke: '#5a3010', strokeWidth: 1.8, fill: '#7a4020', fillStyle: 'solid', seed: 914 });
+  rc.rectangle(nsX+nsW-16, mattressY+nsH, 10, 24,
+    { roughness: 0.8, stroke: '#5a3010', strokeWidth: 1.8, fill: '#7a4020', fillStyle: 'solid', seed: 915 });
+  rc.line(nsX+4, mattressY+nsH*0.4, nsX+nsW-4, mattressY+nsH*0.4,
+    { roughness: 0.8, stroke: '#6a3818', strokeWidth: 1.2, seed: 913 });
+  rc.ellipse(nsX+nsW/2, mattressY-8, 28, 12,
+    { roughness: 0.8, stroke: '#8B6020', strokeWidth: 1.5, fill: '#a06020', fillStyle: 'solid', seed: 911 });
+  rc.polygon([[nsX+nsW/2-20,mattressY-8],[nsX+nsW/2+20,mattressY-8],[nsX+nsW/2+12,mattressY-40],[nsX+nsW/2-12,mattressY-40]],
+    { roughness: 1.2, stroke: '#8B6020', strokeWidth: 1.5, fill: '#f5e890', fillStyle: 'solid', seed: 912 });
+  const grd = ctx.createRadialGradient(nsX+nsW/2,mattressY-28,4,nsX+nsW/2,mattressY-28,75);
+  grd.addColorStop(0,'rgba(255,240,150,0.22)'); grd.addColorStop(1,'rgba(255,240,150,0)');
+  ctx.fillStyle = grd;
+  ctx.fillRect(nsX-40, mattressY-90, 160, 120);
+}
+
+// ── Sleep scene ───────────────────────────────────────────────────
+function drawSleepScene(t) {
+  const bedL = W * 0.05, bedR = bedL + 210;
+  const mattressY = H * 0.52, mattressH = 52;
+  const headCX = bedL + 38;
+  const headCY = mattressY + 4;
+  const feetX  = headCX + 110, feetY = mattressY + 10;
+  const sitX   = bedR - 5, sitY = feetY;
+  // Blanket spans body area
+  const blankX = headCX + 28, blankW = feetX - headCX + 42;
+
+  if (t < 0.22) {
+    // ── Phase 1: Sleeping ──
+
+    // Blanket (full height)
+    rc.rectangle(blankX, mattressY-6, blankW, mattressH+4,
+      { roughness: 2.4, stroke: '#1e3260', strokeWidth: 2.5, fill: '#3a5fa0', fillStyle: 'solid', seed: 950 });
+    rc.path('M '+blankX+' '+(mattressY-6)+' Q '+(blankX+16)+' '+(mattressY+12)+' '+blankX+' '+(mattressY+mattressH-2),
+      { roughness: 2, stroke: '#2a4585', strokeWidth: 2, seed: 951 });
+
+    // Face lying horizontal (-90deg rotation so hair points toward headboard)
+    ctx.save();
+    ctx.translate(headCX, headCY);
+    ctx.rotate(-Math.PI / 2);
+    const s = Math.floor(Math.random()*9999);
+    rc.ellipse(0, 0, 52, 58, { roughness: 1.4, stroke: P.pencil, strokeWidth: 2.2, fill: P.skin, fillStyle: 'solid', seed: s });
+    rc.path('M -26 -4 Q -20 -34 0 -30 Q 20 -34 26 -4',
+      { roughness: 1.5, stroke: P.pencil, strokeWidth: 2, fill: P.hair, fillStyle: 'solid', seed: s+1 });
+    rc.line(-11,-7,-3,-7, { roughness: 0.5, stroke: P.pencil, strokeWidth: 2.5, seed: 961 });
+    rc.line(  3,-7,11,-7, { roughness: 0.5, stroke: P.pencil, strokeWidth: 2.5, seed: 962 });
+    rc.line(-14,-17,-4,-19, { roughness: 0.8, stroke: P.pencil, strokeWidth: 2.2, seed: 963 });
+    rc.line(  4,-19,14,-17, { roughness: 0.8, stroke: P.pencil, strokeWidth: 2.2, seed: 964 });
+    rc.path('M -8 14 Q 0 19 8 14', { roughness: 0.8, stroke: P.pencil, strokeWidth: 2, seed: 965 });
+    rc.ellipse(-27,2,12,16, { roughness: 1.0, stroke: P.pencil, strokeWidth: 1.8, fill: P.skin, fillStyle: 'solid', seed: 966 });
+    rc.ellipse( 27,2,12,16, { roughness: 1.0, stroke: P.pencil, strokeWidth: 1.8, fill: P.skin, fillStyle: 'solid', seed: 967 });
+    rc.rectangle(22,-7,16,14, { roughness: 1.1, stroke: P.pencil, strokeWidth: 1.8, fill: P.skin, fillStyle: 'solid', seed: 968 });
+    ctx.restore();
+
+    // ZZZ
+    for (let z = 0; z < 3; z++) {
+      const zp = (t * 4 + z * 0.33) % 1;
+      const za = zp < 0.6 ? zp/0.6 : 1-(zp-0.6)/0.4;
+      ctx.save();
+      ctx.globalAlpha = za * 0.85;
+      ctx.fillStyle = '#a0c0ff';
+      ctx.font = 'bold ' + (11 + z*5) + 'px "Comic Sans MS", cursive';
+      ctx.textAlign = 'center';
+      ctx.fillText('Z', headCX+38+z*12, headCY-26-zp*62);
+      ctx.restore();
+    }
+
+  } else if (t < 0.42) {
+    // ── Phase 2: Waking — blanket SQUISHES into mattress, char rises ──
+    const f = (t - 0.22) / 0.20;
+    const ease = f * f * (3 - 2 * f);
+
+    // Blanket shrinks from head side toward feet (right edge fixed)
+    const blankRight = blankX + blankW;
+    const blankW_cur = Math.max(0, blankW * (1 - ease));
+    const blankX_cur = blankRight - blankW_cur;
+    if (blankW_cur > 1) {
+      rc.rectangle(blankX_cur, mattressY - 6, blankW_cur, mattressH + 4,
+        { roughness: 2.4 + ease*3, stroke: '#1e3260', strokeWidth: 2.5, fill: '#3a5fa0', fillStyle: 'solid', seed: 950 });
+    }
+
+    // Character rotating up (pajamas)
+    const angle = -Math.PI / 2 * (1 - ease);
+    const charX  = feetX + ease * (sitX - feetX);
+    const stirPose = [ease*(-88), ease*88, ease*(-88), ease*88, 0, -20+ease*16, 20-ease*16, -8, 8];
+    ctx.save();
+    ctx.translate(charX, feetY);
+    ctx.rotate(angle);
+    drawHumanPajamas(0, 0, stirPose, ease > 0.55 ? 'open' : 'blink');
+    ctx.restore();
+
+  } else {
+    // ── Phase 3: Sitting on bed edge (pajamas) ──
+    drawHumanPajamas(sitX, sitY, [-88, 88, -88, 88, 0, -8, -8, 6, 6], 'neutral');
+
+    // Arabic prayer bubble
+    if (t > 0.55 && t < 0.88) {
+      const bx = sitX - 182, by = sitY - 208;
+      rc.rectangle(bx, by, 170, 46,
+        { roughness: 1.5, stroke: P.pencil, fill: P.white, fillStyle: 'solid', strokeWidth: 2, seed: 999 });
+      rc.polygon([[bx+150,by+46],[bx+160,by+62],[bx+134,by+46]],
+        { roughness: 1.2, stroke: P.pencil, fill: P.white, fillStyle: 'solid', strokeWidth: 1.8, seed: 1000 });
+      ctx.save();
+      ctx.fillStyle = P.pencil;
+      ctx.font = 'bold 13px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.direction = 'rtl';
+      ctx.fillText('يارب الاقي شغل اليوم', bx+85, by+27);
+      ctx.direction = 'ltr';
+      ctx.restore();
+    }
+  }
+}
+// ── Jump state machine ────────────────────────────────────────
+// jumpT 0→1 over 60 frames
+function getJumpPose(t) {
+  if (t < 0.15) {
+    // Anticipation: crouch
+    const f = t / 0.15;
+    return [20*f, -25*f, 20*f, -25*f, 12*f, 10*f, -10*f, 5*f, -5*f];
+  } else if (t < 0.35) {
+    // Launch: stretch up
+    const f = (t - 0.15) / 0.2;
+    return [-15*f, 5, -15*f, 5, 12 - 22*f, -20*f, 20*f, -10*f, 10*f];
+  } else if (t < 0.65) {
+    // Air: tuck
+    const f = (t - 0.35) / 0.3;
+    return [-30 + 10*f, -20 + 5*f, -30 + 10*f, -20 + 5*f, -10, -35 + 10*f, 35 - 10*f, -15, 15];
+  } else if (t < 0.82) {
+    // Land squash
+    const f = (t - 0.65) / 0.17;
+    return [20*f, -30*f, 20*f, -30*f, 14*f, 8*f, -8*f, 4*f, -4*f];
+  } else {
+    // Settle
+    const f = (t - 0.82) / 0.18;
+    const ease = 1 - (1-f)*(1-f);
+    return [20*(1-ease), -30*(1-ease), 20*(1-ease), -30*(1-ease), 14*(1-ease), 8*(1-ease), -8*(1-ease), 4*(1-ease), -4*(1-ease)];
+  }
+}
+
+function getJumpY(t) {
+  // Parabola: up during 0.2–0.7, down after
+  if (t < 0.15) return 0;
+  if (t > 0.82) return 0;
+  const mid = (t - 0.15) / (0.82 - 0.15);
+  return -Math.sin(mid * Math.PI) * 100;
+}
+
+// ── Wave pose ────────────────────────────────────────────────
+function getWavePose(t) {
+  const wave = Math.sin(t * Math.PI * 4);
+  return [0, 0, 0, 0, 0,
+    5, -120 - wave * 18,   // right arm up
+    8,  -35 + wave * 20];  // right forearm wave
+}
+
+// ── Idle pose ────────────────────────────────────────────────
+function getIdlePose(t) {
+  const sway = Math.sin(t * Math.PI * 2) * 3;
+  const breath = Math.sin(t * Math.PI * 2) * 2;
+  return [sway, 0, -sway, 0, -breath, sway*1.5, -sway*1.5, sway*0.8, -sway*0.8];
+}
+
+// ── Main loop ────────────────────────────────────────────────
+const FPS = 12;
+let lastTime = 0;
+let scrollX = 0;
+let blinkTimer = 0;
+let blinkOn = false;
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (ts - lastTime < 1000 / FPS) return;
+  lastTime = ts;
+  frame++;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // -- Sleep mode: bedroom scene --
+  if (mode === 'sleep') {
+    sleepT += 0.004;
+    if (sleepT > 1) sleepT = 0;
+    drawBedroom();
+    drawSleepScene(sleepT);
+    return;
+  }
+
+  // -- Phone Walk mode --
+  if (mode === 'phone') {
+    phoneT += 0.005;
+    if (phoneT > 1) phoneT = 0;
+    const cx = W / 2, cy = H * 0.68;
+    if (phoneT < 0.5) scrollX += 3;
+    else if (phoneT < 0.62) scrollX += 3 * (1 - (phoneT - 0.5) / 0.12);
+    drawBackground(scrollX);
+    if (phoneT < 0.5) {
+      const wPose = WALK_FRAMES[frame % 8];
+      drawHuman(cx, cy, wPose, frame % 48 < 4 ? 'blink' : 'neutral');
+    } else if (phoneT < 0.62) {
+      const f = (phoneT - 0.5) / 0.12;
+      const ease = f * f * (3 - 2 * f);
+      const wPose = WALK_FRAMES[frame % 8];
+      const sPose = [2, -2, -2, 2, 2, -145, -155, 80, 85];
+      drawHuman(cx, cy, wPose.map((v, i) => v + (sPose[i] - v) * ease), 'neutral');
+    } else {
+      drawHuman(cx, cy, [2, -2, -2, 2, 2, -145, -155, 80, 85], 'neutral');
+      const pX = cx + 20, pY = cy - 82;
+      rc.rectangle(pX, pY, 24, 40,
+        { roughness: 0.8, stroke: '#222', strokeWidth: 2, fill: '#111', fillStyle: 'solid', seed: 1200 });
+      ctx.save();
+      ctx.fillStyle = '#1a9fff'; ctx.fillRect(pX+2, pY+4, 20, 30);
+      ctx.fillStyle = '#fff';
+      [[5,8,12],[5,14,9],[5,20,14],[5,26,7]].forEach(([dx,dy,w]) => ctx.fillRect(pX+dx, pY+dy, w, 3));
+      ctx.restore();
+      if (phoneT > 0.68 && phoneT < 0.92) {
+        const bx = cx - 110, by = cy - 188;
+        rc.rectangle(bx, by, 130, 42,
+          { roughness: 1.5, stroke: P.pencil, fill: P.white, fillStyle: 'solid', strokeWidth: 2, seed: 1201 });
+        rc.polygon([[bx+108,by+42],[bx+120,by+56],[bx+96,by+42]],
+          { roughness: 1.2, stroke: P.pencil, fill: P.white, fillStyle: 'solid', strokeWidth: 1.8, seed: 1202 });
+        ctx.save();
+        ctx.fillStyle = P.pencil; ctx.font = 'bold 13px Arial, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('New Message! 📩', bx + 65, by + 26);
+        ctx.restore();
+      }
+    }
+    return;
+  }
+
+  // ── Background ──
+  if (mode === 'walk')  scrollX += 3;
+
+  // away mode: no sideways scroll, background is static (character recedes)
+  drawBackground(scrollX);
+
+  // ── Blink logic ──
+  blinkTimer++;
+  if (blinkTimer > 60 && Math.random() < 0.05) { blinkOn = true; blinkTimer = 0; }
+  if (blinkOn && blinkTimer > 2) blinkOn = false;
+
+  // ── Character position ──
+  const cx = W / 2;
+  let cy = H * 0.68;
+  let pose, expr = 'neutral';
+
+  if (mode === 'walk') {
+    pose = WALK_FRAMES[frame % 8];
+    expr = frame % 48 < 4 ? 'blink' : 'neutral';
+    if (blinkOn) expr = 'blink';
+  } else if (mode === 'jump') {
+    jumpT += 1 / 60;
+    if (jumpT > 1) jumpT = 0;
+    pose = getJumpPose(jumpT);
+    cy += getJumpY(jumpT);
+    expr = jumpT > 0.35 && jumpT < 0.65 ? 'open' : 'neutral';
+  } else if (mode === 'wave') {
+    const t = (frame % 72) / 72;
+    pose = getWavePose(t);
+    expr = 'happy';
+  } else if (mode === 'idle') {
+    const t = (frame % 96) / 96;
+    pose = getIdlePose(t);
+    expr = blinkOn ? 'blink' : 'neutral';
+  } else if (mode === 'away') {
+    awayT += 0.003;
+    if (awayT > 1) awayT = 0;
+    const ease = awayT * awayT;
+    const scale = 1 - ease * 0.92;
+    const groundY = H * 0.68;
+    const charX = W / 2 + ease * 40;
+    // shadow
+    rc.ellipse(charX, groundY + 5, 60 * scale, 10 * scale,
+      { roughness: 0.6, stroke: 'none', fill: 'rgba(0,0,0,0.20)', fillStyle: 'solid', seed: 77 });
+    pose = WALK_FRAMES[frame % 8];
+    ctx.save();
+    ctx.translate(charX, groundY);
+    ctx.scale(scale, scale);
+    ctx.translate(-charX, -groundY);
+    drawHumanBack(charX, groundY, pose);
+    ctx.restore();
+    return;
+  }
+
+  drawHuman(cx, cy, pose, expr);
+
+  // ── Speed lines for run ──
+
+
+  // ── Jump: impact star on land ──
+  if (mode === 'jump' && jumpT > 0.8 && jumpT < 0.88) {
+    const starX = cx;
+    const starY = H * 0.68;
+    const pts = 8, outer = 28, inner = 11;
+    const starPts = [];
+    for (let i = 0; i < pts * 2; i++) {
+      const r = i % 2 === 0 ? outer : inner;
+      const a = (i / (pts * 2)) * Math.PI * 2 - Math.PI / 2;
+      starPts.push([starX + r * Math.cos(a), starY + r * Math.sin(a)]);
+    }
+    rc.polygon(starPts, { roughness: 1.8, stroke: P.pencil, fill: P.accent,
+      fillStyle: 'solid', strokeWidth: 2, seed: frame });
+  }
+
+  // ── Wave: speech bubble ──
+  if (mode === 'wave' && (frame % 72) > 20 && (frame % 72) < 60) {
+    const bx = cx + 50, by = cy - 170;
+    rc.rectangle(bx, by, 110, 44,
+      { roughness: 1.5, stroke: P.pencil, fill: P.white, fillStyle: 'solid', strokeWidth: 2, seed: 99 });
+    rc.polygon([[bx+10, by+44],[bx+2, by+60],[bx+28, by+44]],
+      { roughness: 1.2, stroke: P.pencil, fill: P.white, fillStyle: 'solid', strokeWidth: 1.8, seed: 100 });
+    ctx.fillStyle = P.pencil;
+    ctx.font = 'bold 15px "Comic Sans MS", cursive';
+    ctx.textAlign = 'center';
+    ctx.fillText('Hello! 👋', bx + 55, by + 27);
+  }
+}
+
+requestAnimationFrame(loop);
+</script>
+
+<script>
+// ── WebGL post-process: paper grain + vignette + chromatic wobble ────────────
+(function() {
+  const src  = document.getElementById('c');   // Rough.js canvas (source)
+  const glc  = document.getElementById('gl');  // WebGL overlay canvas
+  glc.width  = src.width;
+  glc.height = src.height;
+
+  const gl = glc.getContext('webgl', { alpha: true, premultipliedAlpha: false });
+  if (!gl) return;
+
+  // ── Vertex shader (full-screen quad) ──────────────────────────
+  const VS = `
+    attribute vec2 a_pos;
+    varying vec2 v_uv;
+    void main() {
+      v_uv = a_pos * 0.5 + 0.5;
+      v_uv.y = 1.0 - v_uv.y;          // flip Y (WebGL vs canvas)
+      gl_Position = vec4(a_pos, 0.0, 1.0);
+    }
+  `;
+
+  // ── Fragment shader ────────────────────────────────────────────
+  const FS = `
+    precision mediump float;
+    uniform sampler2D u_tex;
+    uniform float     u_time;
+    uniform vec2      u_res;
+    varying vec2      v_uv;
+
+    // ------- hash / noise helpers --------------------------------
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float noise(vec2 p) {
+      vec2 i = floor(p), f = fract(p);
+      f = f*f*(3.0-2.0*f);
+      return mix(mix(hash(i),         hash(i+vec2(1,0)), f.x),
+                 mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)), f.x), f.y);
+    }
+    // Paper fibre: layered noise at two scales
+    float paperGrain(vec2 uv, float t) {
+      vec2 p = uv * u_res;
+      float g  = noise(p * 0.9  + vec2(t*0.3, 0.0));
+      float g2 = noise(p * 0.22 + vec2(0.0, t*0.2));
+      float g3 = noise(p * 3.1);    // fine speckle
+      return g*0.45 + g2*0.35 + g3*0.20;
+    }
+
+    void main() {
+      // ---- chromatic aberration: shift R and B by tiny amount ----
+      float ca = 0.0018;
+      vec2 dir = v_uv - 0.5;
+      float r = texture2D(u_tex, v_uv + dir * ca        ).r;
+      float g = texture2D(u_tex, v_uv                    ).g;
+      float b = texture2D(u_tex, v_uv - dir * ca * 0.5  ).b;
+      float a = texture2D(u_tex, v_uv).a;
+      vec4 col = vec4(r, g, b, a);
+
+      // ---- paper grain (animates slowly) -------------------------
+      float grain = paperGrain(v_uv, u_time * 0.04);
+      // add grain only to non-transparent pixels
+      float grainStrength = 0.028 * a;
+      col.rgb += (grain - 0.5) * grainStrength * 2.0;
+
+      // ---- warm paper tint (very subtle) -------------------------
+      col.rgb = col.rgb * 1.06 * vec3(1.012, 1.004, 0.995);
+
+      // ---- vignette ----------------------------------------------
+      vec2 vd = v_uv - 0.5;
+      float vign = 1.0 - dot(vd*1.55, vd*1.55);
+      vign = clamp(vign, 0.0, 1.0);
+      vign = pow(vign, 0.38);
+      // vignette affects background more than character (only darken slightly)
+      col.rgb *= mix(1.0, vign, 0.12);
+
+      // ---- pencil edge glow: tiny darkening along sketch lines ---
+      // sample neighbours and detect high-contrast edges
+      float dx = 1.0 / u_res.x;
+      float dy = 1.0 / u_res.y;
+      float lum  = dot(col.rgb, vec3(0.299,0.587,0.114));
+      float lumR = dot(texture2D(u_tex, v_uv+vec2(dx,0)).rgb,  vec3(0.299,0.587,0.114));
+      float lumD = dot(texture2D(u_tex, v_uv+vec2(0,dy)).rgb,  vec3(0.299,0.587,0.114));
+      float edge = abs(lum - lumR) + abs(lum - lumD);
+      edge = clamp(edge * 6.0, 0.0, 1.0);
+      // slightly deepen existing dark lines
+      col.rgb -= edge * 0.04;
+
+      gl_FragColor = vec4(clamp(col.rgb, 0.0, 1.0), a);
+    }
+  `;
+
+  // ── Compile & link ─────────────────────────────────────────────
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compileShader(VS, gl.VERTEX_SHADER));
+  gl.attachShader(prog, compileShader(FS, gl.FRAGMENT_SHADER));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  // ── Full-screen quad ──────────────────────────────────────────
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1,-1, 1,-1, -1,1, 1,-1, 1,1, -1,1]),
+    gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uTex  = gl.getUniformLocation(prog, 'u_tex');
+  const uTime = gl.getUniformLocation(prog, 'u_time');
+  const uRes  = gl.getUniformLocation(prog, 'u_res');
+
+  // ── Texture (re-uploaded every frame from Rough.js canvas) ───
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+  gl.uniform1i(uTex, 0);
+  gl.uniform2f(uRes, src.width, src.height);
+
+  let t = 0;
+  function render() {
+    requestAnimationFrame(render);
+    t++;
+    // Upload the Rough.js canvas as a texture
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    gl.uniform1f(uTime, t);
+    gl.viewport(0, 0, glc.width, glc.height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+  render();
+})();
+</script></body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
